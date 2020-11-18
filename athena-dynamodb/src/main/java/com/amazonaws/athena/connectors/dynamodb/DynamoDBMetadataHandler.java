@@ -49,6 +49,10 @@ import com.amazonaws.athena.connectors.dynamodb.util.DDBRecordMetadata;
 import com.amazonaws.athena.connectors.dynamodb.util.DDBTableUtils;
 import com.amazonaws.athena.connectors.dynamodb.util.DDBTypeUtils;
 import com.amazonaws.athena.connectors.dynamodb.util.IncrementingValueNameProducer;
+import com.amazonaws.auth.AWSCredentialsProvider;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicSessionCredentials;
+import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
@@ -58,6 +62,11 @@ import com.amazonaws.services.glue.AWSGlue;
 import com.amazonaws.services.glue.model.Database;
 import com.amazonaws.services.glue.model.Table;
 import com.amazonaws.services.secretsmanager.AWSSecretsManager;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenService;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenServiceAsyncClientBuilder;
+import com.amazonaws.services.securitytoken.model.AssumeRoleRequest;
+import com.amazonaws.services.securitytoken.model.AssumeRoleResult;
+import com.amazonaws.services.securitytoken.model.Credentials;
 import com.amazonaws.util.json.Jackson;
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.arrow.vector.complex.reader.FieldReader;
@@ -120,6 +129,10 @@ public class DynamoDBMetadataHandler
     private static final String GLUE_ENV = "disable_glue";
     // defines the value that should be present in the Glue Database URI to enable the DB for DynamoDB.
     static final String DYNAMO_DB_FLAG = "dynamo-db-flag";
+    // Env variable name used to indicate that a role should be assumed
+    private static final String ASSUME_ROLE_ENV = "assume_role";
+    // Env variable name used to indicate region
+    private static final String REGION_ENV = "region";
     // used to filter out Glue tables which lack indications of being used for DDB.
     private static final TableFilter TABLE_FILTER = (Table table) -> table.getStorageDescriptor().getLocation().contains(DYNAMODB)
             || (table.getParameters() != null && DYNAMODB.equals(table.getParameters().get("classification")))
@@ -131,29 +144,69 @@ public class DynamoDBMetadataHandler
     private final AmazonDynamoDB ddbClient;
     private final AWSGlue glueClient;
     private final DynamoDBTableResolver tableResolver;
+    private final String assumeRole;
+    private final String region;
 
     public DynamoDBMetadataHandler()
     {
         // disable Glue if the env var is present and not explicitly set to "false"
         super((System.getenv(GLUE_ENV) != null && !"false".equalsIgnoreCase(System.getenv(GLUE_ENV))), SOURCE_TYPE);
-        ddbClient = AmazonDynamoDBClientBuilder.standard().build();
+
+        // Get environment variables
+        String region = System.getenv(REGION_ENV);
+        if (region == null) {
+            this.region = "us-east-1";
+        } else {
+            this.region = region;
+        }
+        assumeRole = System.getenv(ASSUME_ROLE_ENV);
+
+        // Assume role if ARN is provided
+        AWSCredentialsProvider credentialsProvider;
+        if (assumeRole != null) {
+            AWSSecurityTokenService stsClient = AWSSecurityTokenServiceAsyncClientBuilder.standard()
+                    .withRegion(region)
+                    .build();
+            AssumeRoleRequest request = new AssumeRoleRequest().withRoleArn(assumeRole).withRoleSessionName("athena-dynamodb");
+
+            AssumeRoleResult assumeRoleResult = stsClient.assumeRole(request);
+            Credentials creds = assumeRoleResult.getCredentials();
+            credentialsProvider = new AWSStaticCredentialsProvider(
+                    new BasicSessionCredentials(
+                            creds.getAccessKeyId(),
+                            creds.getSecretAccessKey(),
+                            creds.getSessionToken()
+                    )
+            );
+        } else {
+            credentialsProvider = new DefaultAWSCredentialsProviderChain();
+        }
+
+        ddbClient = AmazonDynamoDBClientBuilder.standard().withCredentials(credentialsProvider).build();
         glueClient = getAwsGlue();
         tableResolver = new DynamoDBTableResolver(invoker, ddbClient);
     }
 
     @VisibleForTesting
     DynamoDBMetadataHandler(EncryptionKeyFactory keyFactory,
-            AWSSecretsManager secretsManager,
-            AmazonAthena athena,
-            String spillBucket,
-            String spillPrefix,
-            AmazonDynamoDB ddbClient,
-            AWSGlue glueClient)
+                            AWSSecretsManager secretsManager,
+                            AmazonAthena athena,
+                            String spillBucket,
+                            String spillPrefix,
+                            AmazonDynamoDB ddbClient,
+                            AWSGlue glueClient)
     {
         super(glueClient, keyFactory, secretsManager, athena, SOURCE_TYPE, spillBucket, spillPrefix);
         this.glueClient = glueClient;
         this.ddbClient = ddbClient;
         this.tableResolver = new DynamoDBTableResolver(invoker, ddbClient);
+        this.assumeRole = System.getenv(ASSUME_ROLE_ENV);
+        String region = System.getenv(REGION_ENV);
+        if (region == null) {
+            this.region = "us-east-1";
+        } else {
+            this.region = region;
+        }
     }
 
     /**
@@ -359,7 +412,7 @@ public class DynamoDBMetadataHandler
     Injects additional metadata into the partition schema like a non-key filter expression for additional DDB-side filtering
      */
     private void precomputeAdditionalMetadata(Set<String> columnsToIgnore, Map<String, ValueSet> predicates, List<AttributeValue> accumulator,
-            IncrementingValueNameProducer valueNameProducer, SchemaBuilder partitionsSchemaBuilder, DDBRecordMetadata recordMetadata)
+                                              IncrementingValueNameProducer valueNameProducer, SchemaBuilder partitionsSchemaBuilder, DDBRecordMetadata recordMetadata)
     {
         // precompute non-key filter
         String filterExpression = DDBPredicateUtils.generateFilterExpression(columnsToIgnore, predicates, accumulator, valueNameProducer, recordMetadata);
