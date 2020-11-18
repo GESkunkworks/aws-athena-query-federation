@@ -163,7 +163,7 @@ public class DynamoDBMetadataHandler
 
         // Assume role if ARN is provided
         AWSCredentialsProvider credentialsProvider;
-        if (assumeRole != null) {
+        if (assumeRole != null && !assumeRole.equals("")) {
             AWSSecurityTokenService stsClient = AWSSecurityTokenServiceAsyncClientBuilder.standard()
                     .withRegion(region)
                     .build();
