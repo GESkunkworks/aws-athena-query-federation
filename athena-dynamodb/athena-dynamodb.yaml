@@ -40,6 +40,8 @@ Parameters:
     Description: "WARNING: If set to 'true' encryption for spilled data is disabled."
     Default: 'false'
     Type: String
+Conditions:
+  AssumesRole: !Not [ !Equals [ !Ref AssumeRoleArn, '' ] ]
 Resources:
   ConnectorConfig:
     Type: 'AWS::Serverless::Function'
@@ -77,6 +79,13 @@ Resources:
                 - s3:ListAllMyBuckets
               Effect: Allow
               Resource: '*'
+        - !If
+          - AssumesRole
+          - Statement:
+              - Action: sts:AssumeRole
+                Effect: Allow
+                Resource: !Ref AssumeRoleArn
+          - !Ref AWS::NoValue
           Version: '2012-10-17'
         #S3CrudPolicy allows our connector to spill large responses to S3. You can optionally replace this pre-made policy
         #with one that is more restrictive and can only 'put' but not read,delete, or overwrite files.

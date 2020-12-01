@@ -131,7 +131,8 @@ public class DynamoDBRecordHandler
         String region = System.getenv(REGION_ENV);
         if (region == null) {
             this.region = "us-east-1";
-        } else {
+        }
+        else {
             this.region = region;
         }
         assumeRole = System.getenv(ASSUME_ROLE_ENV);
@@ -140,7 +141,7 @@ public class DynamoDBRecordHandler
         AWSCredentialsProvider credentialsProvider;
         if (assumeRole != null && !assumeRole.equals("")) {
             AWSSecurityTokenService stsClient = AWSSecurityTokenServiceAsyncClientBuilder.standard()
-                    .withRegion(region)
+                    .withRegion(this.region)
                     .build();
             AssumeRoleRequest request = new AssumeRoleRequest().withRoleArn(assumeRole).withRoleSessionName("athena-dynamodb");
 
@@ -153,7 +154,8 @@ public class DynamoDBRecordHandler
                             creds.getSessionToken()
                     )
             );
-        } else {
+        }
+        else {
             credentialsProvider = new DefaultAWSCredentialsProviderChain();
         }
 
@@ -169,7 +171,8 @@ public class DynamoDBRecordHandler
         String region = System.getenv(REGION_ENV);
         if (region == null) {
             this.region = "us-east-1";
-        } else {
+        }
+        else {
             this.region = region;
         }
         assumeRole = System.getenv(ASSUME_ROLE_ENV);
