@@ -31,6 +31,10 @@ import com.amazonaws.athena.connectors.dynamodb.resolver.DynamoDBFieldResolver;
 import com.amazonaws.athena.connectors.dynamodb.util.DDBPredicateUtils;
 import com.amazonaws.athena.connectors.dynamodb.util.DDBRecordMetadata;
 import com.amazonaws.athena.connectors.dynamodb.util.DDBTypeUtils;
+import com.amazonaws.auth.AWSCredentialsProvider;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicSessionCredentials;
+import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
@@ -42,6 +46,11 @@ import com.amazonaws.services.dynamodbv2.model.ScanRequest;
 import com.amazonaws.services.dynamodbv2.model.ScanResult;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.secretsmanager.AWSSecretsManager;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenService;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenServiceAsyncClientBuilder;
+import com.amazonaws.services.securitytoken.model.AssumeRoleRequest;
+import com.amazonaws.services.securitytoken.model.AssumeRoleResult;
+import com.amazonaws.services.securitytoken.model.Credentials;
 import com.amazonaws.util.json.Jackson;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.cache.CacheBuilder;
@@ -93,31 +102,81 @@ public class DynamoDBRecordHandler
     private static final String sourceType = "ddb";
 
     private static final String HASH_KEY_VALUE_ALIAS = ":hashKeyValue";
+    // Env variable name used to indicate that a role should be assumed
+    private static final String ASSUME_ROLE_ENV = "assume_role";
+    // Env variable name used to indicate region
+    private static final String REGION_ENV = "region";
+    private final String assumeRole;
+    private final String region;
 
     private static final TypeReference<HashMap<String, String>> STRING_MAP_TYPE_REFERENCE = new TypeReference<HashMap<String, String>>() {};
     private static final TypeReference<HashMap<String, AttributeValue>> ATTRIBUTE_VALUE_MAP_TYPE_REFERENCE = new TypeReference<HashMap<String, AttributeValue>>() {};
 
     private final LoadingCache<String, ThrottlingInvoker> invokerCache = CacheBuilder.newBuilder().build(
-        new CacheLoader<String, ThrottlingInvoker>() {
-            @Override
-            public ThrottlingInvoker load(String tableName)
-                    throws Exception
-            {
-                return ThrottlingInvoker.newDefaultBuilder(EXCEPTION_FILTER).build();
-            }
-        });
+            new CacheLoader<String, ThrottlingInvoker>() {
+                @Override
+                public ThrottlingInvoker load(String tableName)
+                        throws Exception
+                {
+                    return ThrottlingInvoker.newDefaultBuilder(EXCEPTION_FILTER).build();
+                }
+            });
     private final AmazonDynamoDB ddbClient;
 
     public DynamoDBRecordHandler()
     {
         super(sourceType);
-        this.ddbClient = AmazonDynamoDBClientBuilder.standard().build();
+
+        // Get environment variables
+        String region = System.getenv(REGION_ENV);
+        if (region == null) {
+            this.region = "us-east-1";
+        }
+        else {
+            this.region = region;
+        }
+        assumeRole = System.getenv(ASSUME_ROLE_ENV);
+
+        // Assume role if ARN is provided
+        AWSCredentialsProvider credentialsProvider;
+        if (assumeRole != null && !assumeRole.equals("")) {
+            AWSSecurityTokenService stsClient = AWSSecurityTokenServiceAsyncClientBuilder.standard()
+                    .withRegion(this.region)
+                    .build();
+            AssumeRoleRequest request = new AssumeRoleRequest().withRoleArn(assumeRole).withRoleSessionName("athena-dynamodb");
+
+            AssumeRoleResult assumeRoleResult = stsClient.assumeRole(request);
+            Credentials creds = assumeRoleResult.getCredentials();
+            credentialsProvider = new AWSStaticCredentialsProvider(
+                    new BasicSessionCredentials(
+                            creds.getAccessKeyId(),
+                            creds.getSecretAccessKey(),
+                            creds.getSessionToken()
+                    )
+            );
+        }
+        else {
+            credentialsProvider = new DefaultAWSCredentialsProviderChain();
+        }
+
+        this.ddbClient = AmazonDynamoDBClientBuilder.standard().withCredentials(credentialsProvider).build();
     }
 
     @VisibleForTesting
     DynamoDBRecordHandler(AmazonDynamoDB ddbClient, AmazonS3 amazonS3, AWSSecretsManager secretsManager, AmazonAthena athena, String sourceType)
     {
         super(amazonS3, secretsManager, athena, sourceType);
+
+        // Get environment variables
+        String region = System.getenv(REGION_ENV);
+        if (region == null) {
+            this.region = "us-east-1";
+        }
+        else {
+            this.region = region;
+        }
+        assumeRole = System.getenv(ASSUME_ROLE_ENV);
+
         this.ddbClient = ddbClient;
     }
 
